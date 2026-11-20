@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blumenstrauß</title>
+<!--
+  Browser-Version von bouquet3d.py (1:1 nach JavaScript uebersetzt).
+
+  Original: Copyright (c) 2026 Alish Sharma, MIT License (siehe LICENSE im selben Ordner).
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this
+  software ... The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS".
+
+  Oeffnen: Doppelklick. Einstellungen: Konstanten unten im Skript (wie oben in der .py).
+-->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d0f14; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #glow { filter: blur(8px) brightness(1.7) saturate(1.4); opacity: .75; }   /* Leuchten */
+</style>
+</head>
+<body>
+<canvas id="glow"></canvas>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+
+// ---- Einstellungen (wie oben in bouquet3d.py) -------------------------------
+const SPIN_SPEED = 0.6;
+const TILT = 0.30;
+const CAM_DIST = 4.0;
+const MESSAGE = "for you ♥";
+const NUM_HEARTS = 18;
+const BLOOM_DUR = 1.3;           // wie lange eine Bluete zum Aufgehen braucht (Sekunden)
+const TARGET_ROWS = 80;          // wie viele Textzeilen auf den Bildschirm passen ("Terminalgroesse")
+
+// Farben sind 256-Farben-Terminalcodes, genau wie im Original
+const WHITE = [244, 248, 251, 254, 255, 231];
+const PINK = [125, 162, 168, 205, 211, 218, 225];
+const RED = [52, 88, 124, 160, 196, 203];
+const PURPLE = [54, 91, 97, 134, 140, 183];
+const YELLOW = [136, 178, 214, 220, 226, 229];
+const ORANGE = [130, 166, 202, 208, 214, 216];
+const GOLD_CENTER = [94, 136, 178, 214, 220];
+const DARK_CENTER = [52, 58, 94, 130, 136];
+const GREENS = [22, 28, 28, 34, 35, 71, 77, 114];
+const PAPER = [101, 144, 187, 223, 230, 231];
+const RIBBON = [88, 125, 161, 197, 204, 211];
+const HEART_COLORS = [161, 197, 204, 205, 211, 218];
+const MSG_COLORS = [161, 168, 205, 211, 218, 225, 218, 211, 205, 168];
+const SHADE = ".:-=+*%@";
+const PETAL_SHADE = "+*#%";
+const PIVOT_Y = 0.2;
+
+const _L = [-0.45, 0.6, 0.66];
+const _n = Math.hypot(..._L);
+const [LX, LY, LZ] = _L.map(v => v / _n);
+
+const DISC_TYPES = [
+  [WHITE, GOLD_CENTER, 13],
+  [PINK, GOLD_CENTER, 8],
+  [RED, DARK_CENTER, 6],
+  [PURPLE, GOLD_CENTER, 7],
+  [YELLOW, DARK_CENTER, 12],
+  [ORANGE, DARK_CENTER, 9],
+];
+const TULIP_COLORS = [RED, PINK, YELLOW];
+
+// 256-Farben-Code -> CSS-Farbe
+const XTERM = (() => {
+  const base = ["#000000", "#800000", "#008000", "#808000", "#000080", "#800080", "#008080", "#c0c0c0",
+                "#808080", "#ff0000", "#00ff00", "#ffff00", "#0000ff", "#ff00ff", "#00ffff", "#ffffff"];
+  const lv = [0, 95, 135, 175, 215, 255];
+  const out = base.slice();
+  for (let i = 16; i < 232; i++) {
+    const n = i - 16;
+    out.push(`rgb(${lv[(n / 36) | 0]},${lv[((n / 6) | 0) % 6]},${lv[n % 6]})`);
+  }
+  for (let i = 0; i < 24; i++) { const g = 8 + 10 * i; out.push(`rgb(${g},${g},${g})`); }
+  return out;
+})();
+
+// ---- Helfer ----------------------------------------------------------------
+const norm = v => { const m = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / m, v[1] / m, v[2] / m]; };
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const add = (p, d, k) => [p[0] + d[0] * k, p[1] + d[1] * k, p[2] + d[2] * k];
+const pyIdx = (b, arr) => arr[Math.trunc(b * arr.length)];
+const clampB = b => Math.min(0.999, Math.max(0, b));
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const easeOutBack = x => { const c1 = 1.5, c3 = c1 + 1; return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2; };
+
+// Jeder Punkt hat als letztes Feld tA = Zeitpunkt (Sekunden), ab dem er sichtbar ist.
+// So "waechst" der Strauss: Stiele -> Papier -> Band -> Blaetter -> Stiele der Blueten -> Blueten.
+
+function seeded(seed) {          // fester Zufall, damit der Strauss immer gleich aussieht
+  let s = seed >>> 0;
+  const next = () => {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return { random: next, uniform: (a, b) => a + (b - a) * next() };
+}
+
+// ---- Szene aufbauen (build_scene) ------------------------------------------
+function buildScene() {
+  const rnd = seeded(21);
+  const pts = [];
+  const neck = [0.0, -0.12, 0.0];
+
+  const C = [0.0, 0.12, 0.0], D = 0.64;
+  const N = 10;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const heads = [];
+  for (let i = 0; i < N; i++) {
+    const el = (88 - 60 * Math.sqrt(i / (N - 1))) * Math.PI / 180;
+    const az = i * golden;
+    const d = [Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)];
+    const pos = add(C, d, D * rnd.uniform(0.92, 1.05));
+    heads.push([pos, norm(d)]);
+  }
+
+  const tulipSlots = new Set([3, 8]);
+  const flowers = [];
+  let discI = 0;
+  heads.forEach(([pos, axis], idx) => {
+    const base = add(pos, axis, -0.03);
+    for (let j = 0; j < 140; j++) {         // Stiel vom Bluetenkopf zum Hals
+      const t = j / 139;
+      const p = [base[0] + (neck[0] - base[0]) * t, base[1] + (neck[1] - base[1]) * t,
+                 base[2] + (neck[2] - base[2]) * t];
+      pts.push([p[0], p[1], p[2], axis[0], 0.0, axis[2], GREENS, -0.15, true, null,
+                1.5 + idx * 0.12 + (1 - t) * 0.5]);          // waechst vom Hals zur Bluete
+    }
+    const tb = 2.0 + idx * 0.13;                             // Bluete beginnt aufzugehen
+    if (tulipSlots.has(idx)) {
+      const nT = [...tulipSlots].filter(k => k < idx).length;
+      flowers.push([pos, "tulip", TULIP_COLORS[nT % TULIP_COLORS.length], null, 0, 0.11, rnd.uniform(0, 6.28), tb]);
+    } else {
+      const [petals, center, nPet] = DISC_TYPES[discI % DISC_TYPES.length];
+      discI++;
+      flowers.push([pos, "disc", petals, center, nPet, rnd.uniform(0.12, 0.14), rnd.uniform(0, 6.28), tb]);
+    }
+  });
+
+  for (let i = 0; i < 8; i++) {             // Blaetter
+    const a = (i + 0.4) / 8 * 2 * Math.PI;
+    const c = Math.cos(a), s = Math.sin(a);
+    const base = [0.26 * c, 0.30, 0.26 * s];
+    const d = norm([c, 0.15, s]);
+    const side = [-s, 0.0, c];
+    const n = norm(cross(side, d));
+    const L = 0.30, W = 0.07;
+    for (let ti = 0; ti < 64; ti++) {
+      const t = ti / 63;
+      for (let wi = -10; wi <= 10; wi++) {
+        const w = wi / 10;
+        const curl = 0.025 * w * w;
+        const p = [base[0] + d[0] * L * t + side[0] * W * Math.sin(Math.PI * t) * w + n[0] * curl,
+                   base[1] + d[1] * L * t - 0.10 * t * t + n[1] * curl,
+                   base[2] + d[2] * L * t + side[2] * W * Math.sin(Math.PI * t) * w + n[2] * curl];
+        const rib = Math.abs(wi) <= 1 ? -0.25 : 0.0;
+        pts.push([p[0], p[1], p[2], n[0], n[1], n[2], GREENS, rib, true, null, 1.3 + i * 0.06 + t * 0.5]);
+      }
+    }
+  }
+
+  const y0 = -0.20, y1 = 0.30, r0 = 0.06, r1 = 0.36;   // Papier-Kegel
+  const k = (r1 - r0) / (y1 - y0);
+  const rings = 110;
+  for (let i = 0; i < rings; i++) {
+    const t = i / (rings - 1);
+    const r = r0 + (r1 - r0) * t;
+    const count = Math.max(16, Math.trunc(420 * r));
+    for (let j = 0; j < count; j++) {
+      const ph = (j + rnd.random()) / count * 2 * Math.PI;
+      const c = Math.cos(ph), s = Math.sin(ph);
+      let y = y0 + (y1 - y0) * t;
+      if (t > 0.9) y += 0.03 * Math.sin(9 * ph);
+      const fold = 0.3 * (Math.abs(Math.sin(5 * ph)) - 0.6);
+      const nn = norm([c, -k, s]);
+      pts.push([r * c, y, r * s, nn[0], nn[1], nn[2], PAPER, fold, false, null, 0.3 + t * 0.9]);
+    }
+  }
+
+  for (let i = 0; i < 7; i++) {             // Stiele unten
+    const a = i / 7 * 2 * Math.PI;
+    const sx = 0.025 * Math.cos(a), sz = 0.025 * Math.sin(a);
+    for (let j = 0; j < 80; j++) {
+      const t = j / 79;
+      pts.push([sx * (1 + 1.2 * t), -0.20 - 0.30 * t, sz * (1 + 1.2 * t),
+                Math.cos(a), 0.0, Math.sin(a), GREENS, -0.1, true, null, (1 - t) * 0.3]);
+    }
+  }
+
+  const by = -0.12;                          // Band + Schleife
+  const br = r0 + k * (by - y0) + 0.01;
+  for (let j = 0; j < 220; j++) {
+    const ph = j / 220 * 2 * Math.PI;
+    for (const dy of [-0.014, -0.007, 0.0, 0.007, 0.014])
+      pts.push([br * Math.cos(ph), by + dy, br * Math.sin(ph), Math.cos(ph), 0.0, Math.sin(ph), RIBBON, 0.0, false, null,
+                1.15 + j / 220 * 0.35]);                      // Band wickelt sich herum
+  }
+  const knot = [0.0, by, br + 0.01];
+  for (const side of [-1, 1]) {
+    for (let j = 0; j < 160; j++) {
+      const a = j / 160 * 2 * Math.PI;
+      const lx = side * (0.07 + 0.07 * Math.cos(a));
+      const ly = 0.04 * Math.sin(a) + 0.02 * (0.07 + 0.07 * Math.cos(a)) / 0.14;
+      for (const fill of [1.0, 0.8, 0.6, 0.4])
+        pts.push([knot[0] + lx * fill, knot[1] + ly * fill, knot[2] + 0.01, side * 0.3, 0.2, 0.93, RIBBON, 0.1, true, null,
+                  1.5 + j / 160 * 0.25]);
+    }
+    for (let j = 0; j < 60; j++) {
+      const t = j / 59;
+      pts.push([knot[0] + side * 0.06 * t, knot[1] - 0.15 * t, knot[2] + 0.015,
+                side * 0.2, 0.0, 0.98, RIBBON, -0.05 + 0.05 * Math.sin(t * 9), true, null, 1.6 + t * 0.25]);
+    }
+  }
+  for (const dx of [-0.01, 0.0, 0.01])
+    pts.push([dx, by, knot[2] + 0.02, 0, 0, 1, RIBBON, 0.2, true, "@", 1.5]);
+
+  const babies = [];                         // Schleierkraut
+  for (let i = 0; i < 90; i++) {
+    const a = rnd.random() * 2 * Math.PI;
+    const el = rnd.uniform(0.3, 1.4);
+    const rr = rnd.uniform(0.40, 0.58);
+    babies.push([rr * Math.cos(a) * Math.cos(el), C[1] + rr * Math.sin(el),
+                 rr * Math.sin(a) * Math.cos(el), rnd.uniform(0, 6.28), 3.6 + (i * 0.618 % 1) * 1.4]);
+  }
+
+  const sparkles = [];                       // Funkeln rund um den Strauss
+  for (let i = 0; i < 30; i++) {
+    const a = rnd.random() * 2 * Math.PI;
+    const rr = rnd.uniform(0.75, 0.95);
+    sparkles.push([rr * Math.cos(a), rnd.uniform(-0.3, 1.0), rr * Math.sin(a),
+                   rnd.uniform(0, 6.28), rnd.uniform(1.5, 4.0)]);
+  }
+
+  return [pts, flowers, babies, sparkles];
+}
+
+// ---- Herzen (update_hearts) ------------------------------------------------
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+function updateHearts(hearts, dt) {
+  while (hearts.length < NUM_HEARTS)
+    hearts.push([Math.random(), 1.0 + Math.random(), 0.03 + Math.random() * 0.05,
+                 Math.random() * 6.28, pick(HEART_COLORS)]);
+  for (const h of hearts) {
+    h[1] -= h[2] * dt;
+    if (h[1] < 0) { h[0] = Math.random(); h[1] = 1.0; h[4] = pick(HEART_COLORS); }
+  }
+}
+
+// ---- Bild berechnen (render) -----------------------------------------------
+function render(scene, t, cols, rows, hearts) {
+  const [pts, flowers, babies, sparkles] = scene;
+  const size = cols * rows;
+  const chars = new Array(size).fill(" ");
+  const colors = new Int16Array(size);
+  const zbuf = new Float64Array(size).fill(-1e9);
+
+  const viewRows = rows - 2;
+  // etwas kleiner als im Terminal-Original, damit nichts am Rand abgeschnitten wird, und mittig
+  const scale = Math.max(1.0, Math.min((viewRows - 2) / 1.6, (cols - 2) / 3.7));
+  const sxScale = scale * 2.0;
+  const cx = cols / 2;
+  const cy = viewRows / 2 - 0.02 * scale;
+
+  const ang = t * SPIN_SPEED;
+  const ca = Math.cos(ang), sa = Math.sin(ang);
+  const ct = Math.cos(TILT), st = Math.sin(TILT);
+
+  function projectF(x, y, z) {
+    const xr = x * ca - z * sa;
+    const zr = x * sa + z * ca;
+    const yp = y - PIVOT_Y;
+    const yt = yp * ct - zr * st;
+    const zt = yp * st + zr * ct;
+    const f = CAM_DIST / (CAM_DIST - zt);
+    return [cx + xr * f * sxScale, cy - yt * f * scale, zt, f];
+  }
+  function project(x, y, z) {
+    const [fx, fy, zt] = projectF(x, y, z);
+    return [Math.trunc(fx), Math.trunc(fy), zt];
+  }
+  function plot(col, row, z, ch, color) {
+    if (row >= 0 && row < viewRows && col >= 0 && col < cols) {
+      const i = row * cols + col;
+      if (z > zbuf[i]) { zbuf[i] = z; chars[i] = ch; colors[i] = color; }
+    }
+  }
+
+  drawEffects(plot, t);            // Sterne, Sternschnuppen, Feuerwerk, Blueten an den Seiten
+
+  if (t > 4.0) {
+    for (const [x, y, , phase, color] of hearts) {
+      const c = Math.trunc((x + 0.015 * Math.sin(t * 1.2 + phase)) * cols);
+      plot(((c % cols) + cols) % cols, Math.trunc(y * viewRows), -50, "♥", color);
+    }
+  }
+
+  for (const [x, y, z, nx, ny, nz, pal, tone, twoSided, override, tA] of pts) {
+    if (t < tA) continue;
+    const [col, row, zt] = project(x, y, z);
+    const nxr = nx * ca - nz * sa;
+    const nzr = nx * sa + nz * ca;
+    const nyt = ny * ct - nzr * st;
+    const nzt = ny * st + nzr * ct;
+    let dot = nxr * LX + nyt * LY + nzt * LZ;
+    if (twoSided && dot < 0) dot = -dot * 0.55;
+    const b = clampB(0.25 + 0.75 * Math.max(0, dot) + tone);
+    const ch = override === "P" ? pyIdx(b, PETAL_SHADE) : (override || pyIdx(b, SHADE));
+    plot(col, row, zt, ch, pyIdx(b, pal));
+  }
+
+  // Bluetenkoepfe: flache Formen, die immer zur Kamera schauen
+  flowers.forEach(([[x, y, z], kind, pal, cpal, nPet, R, seed, tb], fi) => {
+    if (t < tb) return;
+    const p = clamp01((t - tb) / BLOOM_DUR);
+    const grow = Math.max(0.05, easeOutBack(p));             // Bluete geht auf (mit leichtem Nachfedern)
+    const [fx, fy, zt, f] = projectF(x, y, z);
+    if (p > 0.55 && !burstDone.has(fi)) {                    // Funken, wenn die Bluete aufgeht
+      burstDone.add(fi);
+      burst(fx, fy, pal.slice(-3), 14, 9, true);
+    }
+    const rx = R * f * sxScale * grow, ry = R * f * scale * grow;
+    const dim = -0.4 * (1 - Math.min(1, Math.max(0, (zt + 0.6) / 1.2)));
+    const rot = seed + ang * 0.7 + (1 - p) * 3;               // dreht sich beim Aufgehen auf
+    for (let row = Math.trunc(fy - ry) - 1; row < Math.trunc(fy + ry) + 2; row++) {
+      const dy = (row + 0.5 - fy) / ry;
+      for (let col = Math.trunc(fx - rx) - 1; col < Math.trunc(fx + rx) + 2; col++) {
+        const dx = (col + 0.5 - fx) / rx;
+        if (kind === "disc") {
+          const s = Math.sqrt(dx * dx + dy * dy);
+          if (s > 1.0) continue;
+          if (s < 0.3) {
+            const b = clampB(0.55 - 0.35 * dx - 0.35 * dy + dim);
+            plot(col, row, zt + 0.06, s < 0.17 ? "@" : "o", pyIdx(b, cpal));
+            continue;
+          }
+          const ph = Math.atan2(dy, dx);
+          const reach = 0.32 + 0.68 * Math.pow(Math.abs(Math.cos(nPet * (ph + rot) / 2)), 0.7);
+          if (s > reach) continue;
+          const edge = s > reach - 0.14 ? -0.22 : 0.0;
+          const b = clampB(0.62 - 0.22 * dx - 0.28 * dy + 0.12 * s + edge + dim);
+          plot(col, row, zt + 0.04 * (1 - s), pyIdx(b, PETAL_SHADE), pyIdx(b, pal));
+        } else {
+          const v = (1 - dy) / 2;
+          if (v < 0 || v > 1) continue;
+          const hw = 0.62 * Math.sin(Math.PI * 0.5 * Math.min(1.0, v * 1.5 + 0.05));
+          if (hw <= 0 || Math.abs(dx) > hw) continue;
+          const xn = dx / hw;
+          if (v > 0.72 + 0.28 * Math.cos(1.5 * Math.PI * xn) ** 2) continue;
+          const seam = (Math.abs(Math.abs(xn) - 0.33) < 0.12 && v > 0.3) ? -0.25 : 0.0;
+          const b = clampB(0.55 - 0.3 * xn + 0.1 * v + seam + dim);
+          plot(col, row, zt + 0.03, pyIdx(b, PETAL_SHADE), pyIdx(b, pal));
+        }
+      }
+    }
+  });
+
+  for (const [x, y, z, phase, tA] of babies) {
+    if (t < tA) continue;
+    const [col, row, zt] = project(x, y, z);
+    const star = Math.sin(t * 2 + phase) > 0.6;
+    plot(col, row, zt + 0.02, star ? "*" : "·", star ? 231 : 255);
+  }
+
+  for (const [x, y, z, phase, speed] of sparkles) {
+    if (t < 3.2) break;
+    const [col, row, zt] = project(x, y, z);
+    const tw = Math.sin(t * speed + phase);
+    if (tw > 0.85) plot(col, row, zt, "*", 231);
+    else if (tw > 0.4) plot(col, row, zt, "+", 225);
+    else if (tw > 0.0) plot(col, row, zt, "·", 218);
+  }
+
+  const shown = Math.max(0, Math.floor((t - 4.2) / 0.09));   // Text wird Buchstabe fuer Buchstabe getippt
+  const msg = [...MESSAGE].slice(0, shown);
+  const mrow = rows - 2;
+  const start = Math.max(0, Math.trunc((cols - [...MESSAGE].length) / 2));
+  const shift = Math.trunc(t * 6);
+  msg.forEach((ch, i) => {
+    if (start + i < cols) {
+      chars[mrow * cols + start + i] = ch;
+      colors[mrow * cols + start + i] = MSG_COLORS[(i + shift) % MSG_COLORS.length];
+    }
+  });
+  return [chars, colors];
+}
+
+// ---- Effekte rundherum ------------------------------------------------------
+// Alles in Zellen-Koordinaten (Spalte/Zeile). Hintergrund-Effekte liegen hinter dem Strauss,
+// die Funken beim Aufbluehen davor.
+let bgStars = [], particles = [], rockets = [], meteors = [], petals = [];
+let nextRocket = 2.5, nextMeteor = 1.5;
+const burstDone = new Set();
+const FIREWORK_PALS = [PINK, YELLOW, PURPLE, ORANGE, WHITE, RED];
+const STAR_COLORS = [238, 240, 242, 245, 248, 146, 103];
+const rand = (a, b) => a + Math.random() * (b - a);
+const sideX = () => Math.random() < 0.5 ? rand(0.02, 0.2) * cols : rand(0.8, 0.98) * cols;
+
+function burst(x, y, pal, n, speed, front) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, sp = speed * rand(0.4, 1);
+    particles.push({ x, y, vx: Math.cos(a) * sp * 2, vy: Math.sin(a) * sp - 2,
+                     life: rand(0.8, 1.5), max: 1.5, col: pick(pal), front });
+  }
+}
+
+function setupEffects() {
+  bgStars = [];
+  for (let i = 0; i < cols * rows / 140; i++)
+    bgStars.push([Math.floor(Math.random() * cols), Math.floor(Math.random() * (rows - 2)),
+                  Math.random() * 6.28, rand(0.5, 2.5), pick(STAR_COLORS)]);
+  petals = [];
+  for (let i = 0; i < 10; i++)
+    petals.push({ x: sideX(), y: rand(0, rows), v: rand(1.5, 3.5), ph: rand(0, 6.28), col: pick(PINK.slice(3)) });
+}
+
+function updateEffects(t, dt) {
+  // kleine Feuerwerke links und rechts
+  if (t > nextRocket) {
+    nextRocket = t + rand(1.0, 2.6);
+    rockets.push({ x: sideX(), y: rows - 3, vy: -rand(14, 22), top: rand(0.1, 0.5) * rows, pal: pick(FIREWORK_PALS) });
+  }
+  rockets = rockets.filter(r => {
+    r.y += r.vy * dt;
+    if (r.y <= r.top) { burst(r.x, r.y, r.pal.slice(-3), 22, 8, false); return false; }
+    return true;
+  });
+  // Sternschnuppen
+  if (t > nextMeteor) {
+    nextMeteor = t + rand(2.0, 5.0);
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    meteors.push({ x: dir > 0 ? rand(0, 0.4) * cols : rand(0.6, 1) * cols, y: rand(0, 0.25) * rows,
+                   vx: dir * rand(30, 45), vy: rand(9, 14), life: rand(0.8, 1.3) });
+  }
+  meteors = meteors.filter(m => { m.x += m.vx * dt; m.y += m.vy * dt; return (m.life -= dt) > 0; });
+  // Funken
+  particles = particles.filter(p => {
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 7 * dt; p.vx *= 0.985;
+    return (p.life -= dt) > 0;
+  });
+  // herabschwebende Blueten an den Seiten
+  for (const p of petals) {
+    p.y += p.v * dt;
+    if (p.y > rows) { p.y = -1; p.x = sideX(); }
+  }
+}
+
+function drawEffects(plot, t) {
+  for (const [c, r, ph, sp, col] of bgStars) {
+    const s = Math.sin(t * sp + ph);
+    if (s > 0.25) plot(c, r, -100, s > 0.95 ? "✦" : s > 0.75 ? "*" : s > 0.5 ? "+" : "·", s > 0.9 ? 250 : col);
+  }
+  for (const p of petals)
+    plot(Math.round(p.x + Math.sin(t * 1.3 + p.ph) * 2), Math.floor(p.y), -90, Math.sin(t * 2 + p.ph) > 0 ? "❀" : "✿", p.col);
+  for (const r of rockets) {
+    plot(Math.round(r.x), Math.floor(r.y), -80, "|", 223);
+    plot(Math.round(r.x), Math.floor(r.y) + 1, -80, "·", 216);
+  }
+  const trail = [255, 252, 249, 246, 243, 240, 238];
+  for (const m of meteors) {
+    plot(Math.round(m.x), Math.floor(m.y), -80, "*", 231);
+    for (let k = 1; k < trail.length; k++)
+      plot(Math.round(m.x - m.vx * 0.018 * k), Math.floor(m.y - m.vy * 0.018 * k), -80, k < 3 ? "-" : "·", trail[k]);
+  }
+  for (const p of particles) {
+    const f = p.life / p.max;
+    plot(Math.round(p.x), Math.floor(p.y), p.front ? 1e6 : -70, f > 0.6 ? "*" : f > 0.3 ? "+" : "·", p.col);
+  }
+}
+
+// ---- Browser-Teil: Raster aus Textzellen auf ein Canvas zeichnen ------------
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const glow = document.getElementById("glow");
+const gctx = glow.getContext("2d");
+let W, H, fs, cw, chh, cols, rows, offX, offY;
+
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  glow.width = W * dpr; glow.height = H * dpr;
+  gctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Terminal-Zelle ist doppelt so hoch wie breit (darauf rechnet das Original)
+  fs = Math.max(6, H / TARGET_ROWS / 1.15);
+  ctx.font = `bold ${fs}px Menlo, Consolas, "DejaVu Sans Mono", monospace`;
+  cw = ctx.measureText("M").width;
+  chh = cw * 2;
+  cols = Math.max(20, Math.floor(W / cw));
+  rows = Math.max(12, Math.floor(H / chh));
+  offX = (W - cols * cw) / 2;
+  offY = (H - rows * chh) / 2;
+  ctx.textBaseline = "middle";
+  setupEffects();
+}
+addEventListener("resize", resize);
+resize();
+
+const scene = buildScene();
+const hearts = [];
+// ?t=5 springt in der Animation nach vorne (zum Testen)
+let t0 = performance.now() - (+new URLSearchParams(location.search).get("t") || 0) * 1000;
+let last = performance.now();
+
+// Klick/Tippen = nochmal aufbluehen lassen
+addEventListener("pointerdown", () => {
+  t0 = performance.now(); burstDone.clear(); particles = []; rockets = []; meteors = [];
+  nextRocket = 2.5; nextMeteor = 1.5;
+});
+
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  const t = (now - t0) / 1000;
+  updateHearts(hearts, dt);
+  updateEffects(t, dt);
+  const [chars, colors] = render(scene, t, cols, rows, hearts);
+
+  ctx.clearRect(0, 0, W, H);
+  for (let r = 0; r < rows; r++) {
+    const y = offY + r * chh + chh / 2;
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (chars[i] === " ") continue;
+      ctx.fillStyle = XTERM[colors[i]];
+      ctx.fillText(chars[i], offX + c * cw, y);
+    }
+  }
+  gctx.clearRect(0, 0, W, H);
+  gctx.drawImage(canvas, 0, 0, W, H);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
