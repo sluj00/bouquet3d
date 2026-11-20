@@ -511,7 +511,7 @@ function drawMessage(t) {
   const shown = Math.max(0, Math.floor((t - 4.2) / 0.09));
   if (!shown) return;
   const msg = [...MESSAGE];
-  const size = Math.min(fs * 2.8, W * 0.9 / (msg.length * 0.62));
+  const size = Math.min(fs * 2.0, W * 0.8 / (msg.length * 0.62));
   ctx.save();
   ctx.font = `bold ${size}px Menlo, Consolas, "DejaVu Sans Mono", monospace`;
   ctx.textBaseline = "middle";
